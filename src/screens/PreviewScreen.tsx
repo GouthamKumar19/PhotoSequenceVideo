@@ -1,15 +1,152 @@
-import React, { useMemo } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { Button, FlatList, Image, StyleSheet, Text, View } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
+import { Audio } from 'expo-av';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/AppNavigator';
 import { useSelection } from '../context/SelectionContext';
+import SlideshowPreview from '../components/SlideshowPreview';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Preview'>;
+
+const DEFAULT_AUDIO = require('../../assets/audio/default-track.wav');
 
 const PreviewScreen: React.FC<Props> = ({ navigation }) => {
   const { selectedPhotos } = useSelection();
   const hasPhotos = selectedPhotos.length >= 3;
   const estimatedDuration = useMemo(() => selectedPhotos.length * 2.5, [selectedPhotos.length]);
+  const [audioReady, setAudioReady] = useState(false);
+  const [audioLoading, setAudioLoading] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const soundRef = useRef<Audio.Sound | null>(null);
+
+  const unloadSound = useCallback(async () => {
+    if (soundRef.current) {
+      try {
+        await soundRef.current.unloadAsync();
+      } catch (error) {
+        // Swallow unload edge cases; preview screen is best-effort.
+      }
+      soundRef.current = null;
+    }
+  }, []);
+
+  React.useEffect(() => {
+    return () => {
+      unloadSound();
+    };
+  }, [unloadSound]);
+
+  React.useEffect(() => {
+    let isMounted = true;
+
+    const prepareSound = async () => {
+      if (!hasPhotos) {
+        setAudioReady(false);
+        setIsPlaying(false);
+        if (soundRef.current) {
+          try {
+            await soundRef.current.stopAsync();
+            await soundRef.current.setPositionAsync(0);
+          } catch (error) {
+            // ignore reset issues
+          }
+        }
+        return;
+      }
+
+      if (soundRef.current) {
+        setAudioReady(true);
+        return;
+      }
+
+      setAudioLoading(true);
+      try {
+        const { sound } = await Audio.Sound.createAsync(DEFAULT_AUDIO, {
+          volume: 0.7,
+          isLooping: true,
+        });
+
+        if (!isMounted) {
+          await sound.unloadAsync();
+          return;
+        }
+
+        soundRef.current = sound;
+        setAudioReady(true);
+      } catch (error) {
+        if (isMounted) {
+          setAudioReady(false);
+        }
+      } finally {
+        if (isMounted) {
+          setAudioLoading(false);
+        }
+      }
+    };
+
+    prepareSound();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [hasPhotos]);
+
+  useFocusEffect(
+    useCallback(() => {
+      let isActive = true;
+
+      const playOnFocus = async () => {
+        if (!hasPhotos || !audioReady || !soundRef.current) {
+          return;
+        }
+
+        try {
+          await soundRef.current.playAsync();
+          if (isActive) {
+            setIsPlaying(true);
+          }
+        } catch (error) {
+          if (isActive) {
+            setIsPlaying(false);
+          }
+        }
+      };
+
+      playOnFocus();
+
+      return () => {
+        isActive = false;
+        if (soundRef.current) {
+          soundRef.current.pauseAsync();
+        }
+        setIsPlaying(false);
+      };
+    }, [audioReady, hasPhotos])
+  );
+
+  const handleToggleAudio = useCallback(async () => {
+    if (!soundRef.current || !audioReady) {
+      return;
+    }
+
+    try {
+      const status = await soundRef.current.getStatusAsync();
+      if (!status.isLoaded) {
+        return;
+      }
+
+      if (status.isPlaying) {
+        await soundRef.current.pauseAsync();
+        setIsPlaying(false);
+      } else {
+        await soundRef.current.playAsync();
+        setIsPlaying(true);
+      }
+    } catch (error) {
+      // toggle failure is non-fatal for preview
+    }
+  }, [audioReady]);
 
   return (
     <View style={styles.container}>
@@ -25,11 +162,35 @@ const PreviewScreen: React.FC<Props> = ({ navigation }) => {
       )}
 
       {hasPhotos && (
-        <View style={styles.summaryCard}>
-          <Text style={styles.summaryHeading}>{`Photos: ${selectedPhotos.length}`}</Text>
-          <Text style={styles.summaryText}>{`Estimated length: ${estimatedDuration.toFixed(1)}s`}</Text>
-          <Text style={styles.summaryText}>Transitions and audio will be applied here.</Text>
-        </View>
+        <>
+          <View style={styles.summaryCard}>
+            <Text style={styles.summaryHeading}>{`Photos: ${selectedPhotos.length}`}</Text>
+            <Text style={styles.summaryText}>{`Estimated length: ${estimatedDuration.toFixed(1)}s`}</Text>
+            <Text style={styles.summaryText}>Transitions and audio will be applied here.</Text>
+          </View>
+
+          <SlideshowPreview photos={selectedPhotos} />
+
+          <View style={styles.audioRow}>
+            <View>
+              <Text style={styles.audioLabel}>Background track</Text>
+              <Text style={styles.audioStatus}>
+                {audioLoading
+                  ? 'Loading…'
+                  : audioReady
+                  ? isPlaying
+                    ? 'Playing'
+                    : 'Paused'
+                  : 'Audio unavailable'}
+              </Text>
+            </View>
+            <Button
+              title={isPlaying ? 'Pause music' : 'Play music'}
+              onPress={handleToggleAudio}
+              disabled={!audioReady || audioLoading}
+            />
+          </View>
+        </>
       )}
 
       <FlatList
@@ -93,6 +254,24 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
   },
   summaryText: {
+    fontSize: 14,
+    color: '#C0C6D4',
+  },
+  audioRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#11161E',
+    borderRadius: 12,
+    padding: 16,
+    gap: 12,
+  },
+  audioLabel: {
+    fontSize: 16,
+    fontWeight: '500',
+    color: '#FFFFFF',
+  },
+  audioStatus: {
     fontSize: 14,
     color: '#C0C6D4',
   },
